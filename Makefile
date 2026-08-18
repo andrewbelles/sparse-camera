@@ -1,41 +1,33 @@
 # Makefile  sparse-camera  (Credit Opus 5)
 #
-#   make          build recv + mock into build/bin
-#   make smoke    run the mock producer against the recv consumer
+#   make          build build/bin/smoke
+#   make smoke    run the smoke test through configs/ini/smoke.ini
 #   make clean    drop all build artifacts
 #
-# Override on the command line, e.g.
-#   make smoke FRAMES=500 FPS=60
+# Everything the run does is configured in the INI, not on the command line.
+# To use a different one:
+#   make smoke CONFIG=other.ini
 
 CC       ?= gcc
-CFLAGS   ?= -std=gnu11 -O3 -g -Wall -Wextra
+CFLAGS   ?= -std=gnu11 -O3 -g -Wall -Wextra -pthread
 CPPFLAGS ?=
-LDLIBS   := -lzmq -lm
+LDLIBS   := -lzmq -lm -pthread
 
 SRC := src/c
 OUT := build
 OBJ := $(OUT)/obj
 BIN := $(OUT)/bin
 
-ENDPOINT ?= ipc:///tmp/frames.sock
-FRAMES   ?= 100
-FPS      ?= 30
+CONFIG ?= configs/ini/smoke.ini
 
-RECV_OBJS := $(OBJ)/recv.o $(OBJ)/sink.o $(OBJ)/frame.o
-MOCK_OBJS := $(OBJ)/mock_camera.o $(OBJ)/camera.o $(OBJ)/frame.o
-
-# v4l2_webcam.c is deliberately not built yet: it carries its own main() and
-# defines v4l2_info_from_ctx as plain `inline`, which emits no symbol to link
-# against. Add it here once both are resolved.
+SMOKE_OBJS := $(OBJ)/smoke.o $(OBJ)/sink.o $(OBJ)/frame.o $(OBJ)/camera.o \
+              $(OBJ)/ini.o $(OBJ)/mock_camera.o $(OBJ)/v4l2_webcam.o
 
 .PHONY: all smoke clean
 
-all: $(BIN)/recv $(BIN)/mock
+all: $(BIN)/smoke
 
-$(BIN)/recv: $(RECV_OBJS) | $(BIN)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
-
-$(BIN)/mock: $(MOCK_OBJS) | $(BIN)
+$(BIN)/smoke: $(SMOKE_OBJS) | $(BIN)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 $(OBJ)/%.o: $(SRC)/%.c | $(OBJ)
@@ -46,15 +38,8 @@ $(OBJ) $(BIN):
 
 -include $(wildcard $(OBJ)/*.d)
 
-# Consumer binds first, then one producer runs to completion. The consumer's
-# exit status is the smoke test result: non-zero means a check failed.
-smoke: all
-	@rm -f /tmp/frames.sock
-	@$(BIN)/recv $(ENDPOINT) $(FRAMES) $(FPS) & \
-	 recv_pid=$$!; \
-	 sleep 1; \
-	 $(BIN)/mock $(ENDPOINT) $(FRAMES) $(FPS) 0; \
-	 wait $$recv_pid
+smoke: $(BIN)/smoke
+	@$(BIN)/smoke $(CONFIG)
 
 clean:
 	rm -rf $(OUT)

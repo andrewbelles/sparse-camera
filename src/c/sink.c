@@ -16,23 +16,28 @@
 #include "wire.h"
 
 typedef struct {
-  bool seen; 
-  uint32_t camera_id; 
-  uint64_t frames; 
+  bool seen;
+  bool spec_known;   // false implies the sink_check_t fallbacks are in use
+  uint32_t camera_id;
+  uint32_t max_sites;
+  double expect_period_ms;
+  uint64_t frames;
   int64_t last_t_ns;
-  uint64_t last_seq; 
-  double dt_min_ms, dt_max_ms, dt_sum_ms; 
-  uint64_t dt_n; 
-} cam_state_t; 
+  uint64_t last_seq;
+  double dt_min_ms, dt_max_ms, dt_sum_ms;
+  uint64_t dt_n;
+} cam_state_t;
 
 struct sink {
-  void* zmq_ctx; 
-  void* socket; 
-  frame_t* decoded; 
-  sink_check_t check; 
-  sink_stats_t stats; 
-  cam_state_t cams[SINK_MAX_CAMERAS]; 
-}; 
+  void* zmq_ctx;
+  void* socket;
+  frame_t* decoded;
+  sink_check_t check;
+  sink_stats_t stats;
+  cam_state_t cams[SINK_MAX_CAMERAS];
+  sink_cam_spec_t specs[SINK_MAX_CAMERAS];
+  size_t n_specs;
+};
 
 
 static cam_state_t* cam_find(sink_t* sink, uint32_t id)
@@ -45,16 +50,64 @@ static cam_state_t* cam_find(sink_t* sink, uint32_t id)
 
   for ( uint32_t i = 0; i < SINK_MAX_CAMERAS; i++ ) {
     if ( !sink->cams[i].seen ) {
-      sink->cams[i].seen = true;
-      sink->cams[i].camera_id = id; 
-      sink->cams[i].dt_min_ms = 1e18; 
-      sink->cams[i].dt_max_ms = -1e18; 
-      sink->stats.cameras_seen++; 
-      return &sink->cams[i]; 
+      cam_state_t* cam = &sink->cams[i];
+
+      cam->seen      = true;
+      cam->camera_id = id;
+      cam->dt_min_ms = 1e18;
+      cam->dt_max_ms = -1e18;
+
+      // bounds come from this camera's spec, or the global fallback
+      cam->max_sites        = sink->check.max_sites;
+      cam->expect_period_ms = sink->check.expect_period_ms;
+
+      for ( size_t j = 0; j < sink->n_specs; j++ ) {
+        if ( sink->specs[j].camera_id == id ) {
+          cam->max_sites        = sink->specs[j].max_sites;
+          cam->expect_period_ms = sink->specs[j].expect_period_ms;
+          cam->spec_known       = true;
+          break;
+        }
+      }
+
+      if ( sink->n_specs && !cam->spec_known ) {
+        fprintf(stderr, "sink: cam %u sent frames but was never configured\n", id);
+        sink->stats.unexpected_cams++;
+      }
+
+      sink->stats.cameras_seen++;
+      return cam;
     }
   }
 
-  return NULL; 
+  return NULL;
+}
+
+
+int sink_expect(sink_t* sink, const sink_cam_spec_t* specs, size_t n)
+{
+  if ( !sink || (n && !specs) || n > SINK_MAX_CAMERAS ) {
+    return -1;
+  }
+
+  uint32_t largest = 0;
+
+  for ( size_t i = 0; i < n; i++ ) {
+    sink->specs[i] = specs[i];
+
+    if ( specs[i].max_sites > largest ) {
+      largest = specs[i].max_sites;
+    }
+  }
+  sink->n_specs = n;
+
+  /* decode buffer has to hold the widest frame any configured camera can send */
+  if ( largest && frame_reserve(sink->decoded, largest) != 0 ) {
+    fprintf(stderr, "sink: could not grow decode buffer to %u sites\n", largest);
+    return -1;
+  }
+
+  return 0;
 }
 
 
@@ -147,9 +200,9 @@ static void sink_validate(sink_t* sink, const frame_t* f)
       sink->stats.backwards++; 
       fprintf(stderr, "sink: cam %u seq %lu: stamp did not advance (%.3f ms)\n",
           f->camera_id, f->sequence, dt_ms);  
-    } else if ( sink->check.expect_period_ms > 0.0 ) {
-      const double p   = sink->check.expect_period_ms; 
-      const double tol = sink->check.tol; 
+    } else if ( cam->expect_period_ms > 0.0 ) {
+      const double p   = cam->expect_period_ms;
+      const double tol = sink->check.tol;
 
       if ( dt_ms < p * (1.0 - tol) || dt_ms > p * (1.0 + tol) ) {
         sink->stats.jitter++; 
@@ -182,8 +235,8 @@ static void sink_validate(sink_t* sink, const frame_t* f)
     const uint32_t s = f->support[i]; 
     const float   v  = f->signal[i]; 
 
-    if ( (sink->check.max_sites && s >= sink->check.max_sites) ) {
-      idx_bad = true; 
+    if ( cam->max_sites && s >= cam->max_sites ) {
+      idx_bad = true;
     }
 
     if ( !isfinite(v) || v < 0.0 || v > 1.0 ) {
@@ -309,13 +362,17 @@ int sink_report(const sink_t* sink)
     }
 
     printf("  cam %-3u frames %-6lu last_seq %-6lu",
-        c->camera_id, c->frames, c->last_seq); 
+        c->camera_id, c->frames, c->last_seq);
 
     if ( c->dt_n ) {
       printf(" dt min/mean/max %.2f/%.2f/%.2f ms",
-          c->dt_min_ms, c->dt_sum_ms / (double)c->dt_n, c->dt_max_ms); 
+          c->dt_min_ms, c->dt_sum_ms / (double)c->dt_n, c->dt_max_ms);
     }
-    printf("\n"); 
+
+    if ( sink->n_specs && !c->spec_known ) {
+      printf(" (unconfigured)");
+    }
+    printf("\n");
   }
 
   printf("bad_parse       %lu\n", s->bad_parse);
@@ -325,9 +382,11 @@ int sink_report(const sink_t* sink)
          s->seq_gaps, s->seq_lost);
   printf("bad support idx %lu\n", s->bad_index);
   printf("bad signal val  %lu\n", s->bad_value);
- 
+  printf("unconfigured    %u\n", s->unexpected_cams);
+
   const bool failed = s->received == 0 || s->bad_parse || s->backwards ||
-                      s->seq_gaps || s->bad_index || s->bad_value;
+                      s->seq_gaps || s->bad_index || s->bad_value ||
+                      s->unexpected_cams;
  
   printf("result          %s\n", failed ? "FAIL" : "PASS");
   return failed ? 1 : 0;

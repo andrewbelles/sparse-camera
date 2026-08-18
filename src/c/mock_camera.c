@@ -1,43 +1,35 @@
 /*
- * mock_camera.c  Andrew Belles
+ * mock_camera.c  Opus 5 
  *
- * Synthetic camera backend + standalone driver for smoke-testing the
- * acquisition -> wire -> sink path without any hardware.
+ * Synthetic camera backend for smoke-testing the acquisition -> wire -> sink
+ * path without any hardware.
  *
- * Emits a band of `sites` contiguous cells that walks across a rows x cols
+ * Emits a band of sites contiguous cells that walks across a rows x cols
  * grid, one step per frame, paced to a requested fps off CLOCK_MONOTONIC.
  * Every value lands in [0, 1] and every index in [0, rows*cols), so a clean
  * run must report zero bad_index / bad_value / seq_gaps.
  *
- * Run:
- *    ./mock [endpoint] [n_frames] [fps] [camera_id]
- *
- * n_frames 0 means run until Ctrl-C (SIGINT).
+ * Satisfies the camera_interface_t outlined in camera.h
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <signal.h>
 #include <time.h>
 
+#include "mock_camera.h"
 #include "camera.h"
 #include "frame.h"
 
 #define NANOSECONDS 1000000000LL
 
-#define MOCK_ROWS  64u
-#define MOCK_COLS  64u
-#define MOCK_SITES 256u
-
 typedef struct mock_ctx {
-  uint32_t rows, cols;
-  uint32_t sites;     // sites emitted per frame
-  int64_t  period_ns;
-  int64_t  next_ns;   // absolute wake deadline for the next frame
-  uint64_t sequence;  // stand-in for a driver frame counter
-  bool     up;
+  mock_config_t cfg;
+  int64_t period_ns;
+  int64_t next_ns;   // absolute wake deadline for the next frame
+  uint64_t sequence; // stand-in for a driver frame counter
+  bool up;
 } mock_ctx_t;
 
 
@@ -63,6 +55,46 @@ static void sleep_until_ns(int64_t deadline_ns)
 }
 
 
+mock_ctx_t* mock_ctx_create(const mock_config_t* cfg)
+{
+  if ( !cfg || cfg->rows == 0 || cfg->cols == 0 || cfg->fps <= 0.0 ) {
+    return NULL;
+  }
+
+  mock_ctx_t* ctx = calloc(1, sizeof(mock_ctx_t)); // force zero
+
+  if ( !ctx ) {
+    return NULL;
+  }
+
+  ctx->cfg       = *cfg;
+  ctx->period_ns = (int64_t)((double)NANOSECONDS / cfg->fps);
+
+  if ( ctx->period_ns <= 0 ) {
+    free(ctx);
+    return NULL;
+  }
+
+  return ctx;
+}
+
+
+void mock_ctx_destroy(mock_ctx_t* ctx)
+{
+  free(ctx);
+}
+
+
+size_t mock_max_sites(const mock_ctx_t* ctx)
+{
+  if ( !ctx ) {
+    return 0;
+  }
+
+  return (size_t)ctx->cfg.rows * ctx->cfg.cols;
+}
+
+
 /* ----------------------------------------------
  * camera_interface_t implementation
  * ---------------------------------------------- */
@@ -71,7 +103,7 @@ static int mock_init(void* impl_ctx)
 {
   mock_ctx_t* ctx = (mock_ctx_t *)impl_ctx;
 
-  if ( !ctx || ctx->rows == 0 || ctx->cols == 0 || ctx->period_ns <= 0 ) {
+  if ( !ctx || ctx->period_ns <= 0 ) {
     return -1;
   }
 
@@ -111,12 +143,24 @@ static int mock_acquire(void* impl_ctx, frame_t* out)
   }
 
   sleep_until_ns(ctx->next_ns);
+
+  const int64_t t_ns = monotonic_ns();
+
+  /*
+   * Absolute deadlines hold the cadence without drift. If the thread was
+   * descheduled past a deadline, resync rather than advancing by period
+   * alone; advancing alone would emit the backlog with no delay between
+   * frames.
+   */
   ctx->next_ns += ctx->period_ns;
 
-  const int64_t t_ns   = monotonic_ns();
-  const uint32_t total = ctx->rows * ctx->cols;
+  if ( ctx->next_ns <= t_ns ) {
+    ctx->next_ns = t_ns + ctx->period_ns;
+  }
 
-  uint32_t n = ctx->sites;
+  const uint32_t total = ctx->cfg.rows * ctx->cfg.cols;
+
+  uint32_t n = ctx->cfg.sites;
 
   if ( n > total )         n = total;
   if ( n > out->capacity ) n = out->capacity;
@@ -139,81 +183,8 @@ static int mock_acquire(void* impl_ctx, frame_t* out)
 }
 
 
-static const camera_interface_t mock_camera_interface = {
+const camera_interface_t mock_camera_interface = {
   .init    = mock_init,
   .deinit  = mock_deinit,
   .acquire = mock_acquire
 };
-
-
-/* ----------------------------------------------
- * driver
- * ---------------------------------------------- */
-
-static volatile sig_atomic_t g_stop = 0;
-
-static void on_sigint(int s) {
-  (void)s;
-  g_stop = 1;
-}
-
-
-int main(int argc, char** argv)
-{
-  const char* endpoint = argc > 1 ? argv[1] : "ipc:///tmp/frames.sock";
-  const uint64_t want  = argc > 2 ? strtoull(argv[2], NULL, 10) : 100;
-  const double fps     = argc > 3 ? strtod(argv[3], NULL) : 30.0;
-  const uint32_t id    = argc > 4 ? (uint32_t)strtoul(argv[4], NULL, 10) : 0;
-
-  if ( fps <= 0.0 ) {
-    fprintf(stderr, "mock: fps must be positive\n");
-    return 2;
-  }
-
-  signal(SIGINT, on_sigint);
-
-  mock_ctx_t mock = {
-    .rows      = MOCK_ROWS,
-    .cols      = MOCK_COLS,
-    .sites     = MOCK_SITES,
-    .period_ns = (int64_t)(NANOSECONDS / fps)
-  };
-
-  camera_config_t cfg = {
-    .endpoint  = endpoint,
-    .zmq_ctx   = NULL,          // standalone process; own context
-    .camera_id = id,
-    .frame_cap = (size_t)MOCK_ROWS * MOCK_COLS,
-    .sndhwm    = 0
-  };
-
-  camera_ctx_t* camera = camera_new(&cfg, &mock_camera_interface, &mock);
-
-  if ( !camera ) {
-    fprintf(stderr, "mock: camera_new(%s) failed\n", endpoint);
-    return 2;
-  }
-
-  printf("mock cam %u -> %s, %ux%u grid, %u sites, %.1f fps\n",
-         id, endpoint, MOCK_ROWS, MOCK_COLS, MOCK_SITES, fps);
-
-  uint64_t ticks = 0;
-  int rc = 0;
-
-  while ( !g_stop && (want == 0 || ticks < want) ) {
-    rc = camera_tick(camera);
-
-    if ( rc < 0 ) {
-      fprintf(stderr, "mock: camera_tick failed (%d)\n", rc);
-      break;
-    }
-
-    ticks++;  // timeouts and drops still count as attempts
-  }
-
-  printf("mock cam %u: sent %lu, dropped %lu\n",
-         id, camera_frames_sent(camera), camera_frames_dropped(camera));
-
-  camera_del(camera);
-  return rc < 0 ? 1 : 0;
-}
