@@ -6,13 +6,13 @@
 #
 #   scripts/memtest.sh [config]
 #
-# Defaults to configs/ini/memtest.ini. Override BIN or ART in the environment.
 # Exits 1 on a memory error, otherwise the smoke test's own status.
 
 set -euo pipefail
 
-BIN=${BIN:-build/bin/smoke}
-ART=${ART:-artifacts}
+BIN=build/bin/smoke
+ART=artifacts
+
 CONFIG=${1:-configs/ini/memtest.ini}
 
 if ! command -v valgrind >/dev/null; then

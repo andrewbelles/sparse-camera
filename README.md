@@ -34,13 +34,26 @@ src/c/
   ini.{c,h}          config file reader
   smoke.c            smoke test driver
 configs/ini/         configuration files
+scripts/             setup, memtest, and profiling drivers
 ```
+
+Builds land in `build/`, profiling output in `artifacts/`, and fetched tooling
+in `tools/`. All three are ignored by git and removed by `make clean`.
 
 ## Requirements
 
-- gcc with C11 support
-- libzmq (`libzmq3-dev` on Debian and Ubuntu)
-- Linux headers for the V4L2 backend
+Building needs gcc with C11 support, libzmq (`libzmq3-dev` on Debian and
+Ubuntu), and the Linux headers for the V4L2 backend. `make memtest` needs
+valgrind, and `make perf` needs perf plus `kernel.perf_event_paranoid` at 2 or
+lower.
+
+```
+scripts/setup.sh --check
+```
+
+reports what is missing without changing anything. Running it without `--check`
+installs the packages, sets the sysctl, and fetches the flamegraph scripts,
+after showing what it will do.
 
 ## Building
 
@@ -48,7 +61,7 @@ configs/ini/         configuration files
 make
 ```
 
-Produces `build/bin/smoke`. `make clean` removes `build/`.
+Produces `build/bin/smoke`.
 
 ## Running
 
@@ -72,6 +85,22 @@ build/bin/smoke configs/ini/smoke.ini
 *_Note_*: It exits non-zero if any check fails. Currently this means the `v4l2` 
 backend fails since it drops a frame on start-up. I'm debating whether it is worth
 adding a guard against this or not. 
+
+## Memory and performance
+
+```
+make memtest
+make perf
+```
+
+`memtest` runs the smoke test under valgrind using `configs/ini/memtest.ini`
+and exits 1 on a memory error. `perf` profiles `configs/ini/perf.ini` and
+writes `perf.data`, a report, a callgraph, and `flamegraph.svg` into
+`artifacts/`. Both take a config path as their only argument:
+
+```
+scripts/memtest.sh configs/ini/other.ini
+```
 
 ## Configuration
 

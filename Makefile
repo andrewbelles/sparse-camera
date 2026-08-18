@@ -20,6 +20,7 @@ SRC := src/c
 OUT := build
 OBJ := $(OUT)/obj
 BIN := $(OUT)/bin
+ART := artifacts
 
 CONFIG ?= configs/ini/smoke.ini
 
@@ -34,10 +35,10 @@ PERF_CFLAGS := -std=gnu11 -O3 -g -fno-omit-frame-pointer -pthread
 
 .PHONY: all setup smoke memtest perf clean
 
+all: $(BIN)/smoke
+
 setup:
 	@scripts/setup.sh
-
-all: $(BIN)/smoke
 
 $(BIN)/smoke: $(SMOKE_OBJS) | $(BIN)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
@@ -63,4 +64,4 @@ perf: $(BIN)/smoke-perf
 	@scripts/perf.sh
 
 clean:
-	rm -rf $(OUT) artifacts
+	rm -rf $(OUT) $(ART)

@@ -122,20 +122,6 @@ inline size_t v4l2_max_sites(const v4l2_ctx_t* __restrict__ ctx)
 }
 
 
-static int v4l2_teardown(v4l2_ctx_t* ctx)
-{
-  if ( !ctx ) {
-    return -2; // return distinct from -1; despite call to implying exit unconditionally  
-  }
-
-  if ( ctx->fd >= 0 ) {
-    close(ctx->fd); 
-  }
-  ctx->fd = -1; 
-  return -1; 
-}
-
-
 static int v4l2_check_capabilities(v4l2_ctx_t* ctx)
 {
   if ( !ctx ) {
@@ -538,15 +524,3 @@ const camera_interface_t v4l2_camera_interface = {
   .deinit  = v4l2_deinit, 
   .acquire = v4l2_acquire 
 };
-
-/*
- * Dumps a debug frame luminance for logging/viewing purposes. 
- * Requires the debug frame to be valid in context 
- */
-void v4l2_dump_luminance(const v4l2_ctx_t *ctx, const char *path)
-{
-  if ( !ctx || !ctx->debug_valid ) {
-
-  }
-}
-

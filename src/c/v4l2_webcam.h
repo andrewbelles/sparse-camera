@@ -34,8 +34,10 @@ size_t v4l2_max_sites(const v4l2_ctx_t* ctx);
 
 /*
  * Writes the most recent raw YUYV buffer as a P5 PGM (luminance plane). 
+ *
+ * Currently a stub/not-implemented
  */
-void v4l2_dump_luminance(const v4l2_ctx_t* ctx, const char* path); 
+// void v4l2_dump_luminance(const v4l2_ctx_t* ctx, const char* path); 
 
 extern const camera_interface_t v4l2_camera_interface; 
 

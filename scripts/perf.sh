@@ -5,24 +5,18 @@
 # profile the smoke test and write a breakdown to artifacts/.
 #
 #   scripts/perf.sh [config]
-#
-# Defaults to configs/ini/perf.ini. Override BIN, ART, FREQ, CALLGRAPH, STAT,
-# or FLAMEGRAPH_DIR in the environment. STAT=1 adds a second counters pass.
-# Writes perf.data and the reports named at the end of this script into ART.
 
 set -euo pipefail
 
-BIN=${BIN:-build/bin/smoke-perf}
-ART=${ART:-artifacts}
-FREQ=${FREQ:-999}
-# Stacks stop at libzmq, built without frame pointers; CALLGRAPH=dwarf sees through it.
-CALLGRAPH=${CALLGRAPH:-fp}
-FLAMEGRAPH_DIR=${FLAMEGRAPH_DIR:-tools/FlameGraph}
+BIN=build/bin/smoke-perf
+ART=artifacts
+FLAMEGRAPH=tools/FlameGraph
+FREQ=999
 
 CONFIG=${1:-configs/ini/perf.ini}
 
-# perf report otherwise fetches symbols over the network; DEBUGINFOD=1 re-enables.
-[[ ${DEBUGINFOD:-0} == 1 ]] || export DEBUGINFOD_URLS=
+# perf report otherwise fetches symbols over the network for every build-id.
+export DEBUGINFOD_URLS=
 
 paranoid=$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 4)
 
@@ -57,19 +51,14 @@ abort_if_interrupted() {
 
 echo "perf: $CONFIG at ${FREQ} Hz -> $ART/"
 
-# One pass; a counters pass would double a wall time bound by the slowest camera.
+# Stacks stop at libzmq, which is built without frame pointers.
 status=0
-perf record -F "$FREQ" -g --call-graph="$CALLGRAPH" -o "$ART/perf.data" -- \
+perf record -F "$FREQ" -g --call-graph=fp -o "$ART/perf.data" -- \
     "$BIN" "$CONFIG" >>"$run" 2>&1 || status=$?
 
 # 130 and 143 are SIGINT and SIGTERM reaching the workload directly
 if (( status == 130 || status == 143 )); then interrupted=1; fi
 abort_if_interrupted
-
-if [[ ${STAT:-0} == 1 ]]; then
-  perf stat -o "$ART/perf-stat.txt" "$BIN" "$CONFIG" >>"$run" 2>&1 || true
-  abort_if_interrupted
-fi
 
 if [[ ! -s $ART/perf.data ]]; then
   echo "perf: no samples recorded, see $run" >&2
@@ -84,19 +73,14 @@ perf report -i "$ART/perf.data" --stdio -g graph,0.5,caller \
     >"$ART/perf-callgraph.txt" 2>/dev/null || true
 abort_if_interrupted
 
-perf annotate -i "$ART/perf.data" --stdio \
-    >"$ART/perf-annotate.txt" 2>/dev/null || true
-abort_if_interrupted
-
-if [[ -x $FLAMEGRAPH_DIR/stackcollapse-perf.pl ]]; then
+if [[ -x $FLAMEGRAPH/stackcollapse-perf.pl ]]; then
   perf script -i "$ART/perf.data" \
-    | "$FLAMEGRAPH_DIR/stackcollapse-perf.pl" \
-    | "$FLAMEGRAPH_DIR/flamegraph.pl" --title "sparse-camera" \
+    | "$FLAMEGRAPH/stackcollapse-perf.pl" \
+    | "$FLAMEGRAPH/flamegraph.pl" --title "sparse-camera" \
     >"$ART/flamegraph.svg"
-  echo "perf: wrote $ART/flamegraph.svg"
 else
   echo "perf: no flamegraph tooling; run scripts/setup.sh" >&2
 fi
 
-echo "perf: wrote perf-report.txt, perf-callgraph.txt, perf-annotate.txt to $ART/"
+echo "perf: wrote $ART/"
 head -n 25 "$ART/perf-report.txt"
